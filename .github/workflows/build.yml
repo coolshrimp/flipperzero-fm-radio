@@ -45,9 +45,9 @@ jobs:
         run: |
           mkdir -p release-out
           for f in ${{ steps.build.outputs.fap-artifacts }}; do
-            base=$(basename "$f" .fap)
-            cp "$f" "release-out/${base}-${{ matrix.name }}-${{ steps.build.outputs.suffix }}.fap"
+            cp "$f" "release-out/fm_radio-${GITHUB_REF_NAME}-${{ matrix.name }}.fap"
           done
+          echo "Built against SDK: ${{ steps.build.outputs.suffix }}"
           ls -la release-out
 
       - name: Upload build artifact
@@ -63,3 +63,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release-out/*.fap
+          generate_release_notes: true
+          body: |
+            | File | Firmware |
+            |------|----------|
+            | `official` | Official Flipper firmware (release) |
+            | `official-dev` | Official Flipper firmware (dev branch) |
+            | `unleashed` | Unleashed firmware |
+            | `momentum` | Momentum firmware |
+
+            Copy the matching `.fap` to `SD Card/apps/GPIO/` or install via qFlipper.
