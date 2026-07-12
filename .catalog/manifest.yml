@@ -11,7 +11,7 @@ sourcecode:
   type: git
   location:
     origin: https://github.com/coolshrimp/flipperzero-fm-radio.git
-    commit_sha: 6c3dce0941a79cee73511770a6d680c0e4e841c3
+    commit_sha: 105328e253b22de8a7cd598f2434d97e70eabf75
 
 name: FM Radio
 id: fm_radio
