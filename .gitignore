@@ -1,0 +1,16 @@
+# ufbt / fbt build output
+dist/
+.ufbt/
+
+# Generated IDE config (recreated by `ufbt vscode_dist`)
+.vscode/
+
+# Build intermediates
+*.o
+*.d
+*.elf
+*.fap
+
+# OS junk
+Thumbs.db
+.DS_Store
