@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: official
+            sdk-channel: release
+            sdk-index-url: ""
+          - name: official-dev
+            sdk-channel: dev
+            sdk-index-url: ""
+          - name: unleashed
+            sdk-channel: release
+            sdk-index-url: https://up.unleashedflip.com/directory.json
+          - name: momentum
+            sdk-channel: release
+            sdk-index-url: https://up.momentum-fw.dev/firmware/directory.json
+    name: Build for ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build FAP
+        id: build
+        uses: flipperdevices/flipperzero-ufbt-action@v0.1
+        with:
+          sdk-channel: ${{ matrix.sdk-channel }}
+          sdk-index-url: ${{ matrix.sdk-index-url }}
+
+      - name: Rename FAP with firmware name
+        shell: bash
+        run: |
+          mkdir -p release-out
+          for f in ${{ steps.build.outputs.fap-artifacts }}; do
+            base=$(basename "$f" .fap)
+            cp "$f" "release-out/${base}-${{ matrix.name }}-${{ steps.build.outputs.suffix }}.fap"
+          done
+          ls -la release-out
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fm_radio-${{ matrix.name }}
+          path: release-out/*.fap
+
+      # When a v* tag is pushed, create/update the GitHub Release and
+      # attach all four firmware builds to it automatically.
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-out/*.fap
