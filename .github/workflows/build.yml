@@ -56,10 +56,20 @@ jobs:
           name: fm_radio-${{ matrix.name }}
           path: release-out/*.fap
 
-      # When a v* tag is pushed, create/update the GitHub Release and
-      # attach all four firmware builds to it automatically.
+  # Single job attaches all four builds to the Release at once,
+  # avoiding the race of parallel jobs creating the same release.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-out
+          merge-multiple: true
+
       - name: Attach to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: release-out/*.fap
