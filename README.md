@@ -1,4 +1,4 @@
-# FM Radio - Flipper Zero
+# FM Radio — for Flipper Zero
 
 FM radio app for the Flipper Zero that controls external FM tuner boards over I2C. Supports **TEA5767** and **Si4703** chips with automatic detection.
 

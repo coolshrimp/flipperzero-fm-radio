@@ -8,7 +8,7 @@ App(
     fap_icon="radio.png",
     fap_icon_assets="images",
     fap_author="coolshrimp",
-    fap_weburl="https://github.com/coolshrimp/flipper-fm-radio",
+    fap_weburl="https://github.com/coolshrimp/flipperzero-fm-radio",
     fap_version="2.0",
     fap_description="FM Radio app for TEA5767 and Si4703 chips with auto-detection, SD card station lists, and settings",
 )

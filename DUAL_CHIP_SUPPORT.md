@@ -1,7 +1,7 @@
 # Dual Chip Support - TEA5767 & Si4703
 
 ## Overview
-Your FM Radio app now supports **both TEA5767 and Si4703** FM radio chips with automatic detection!
+FM Radio app now supports **both TEA5767 and Si4703** FM radio chips with automatic detection!
 
 ## Features Added
 
