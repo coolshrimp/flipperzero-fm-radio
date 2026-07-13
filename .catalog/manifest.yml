@@ -16,7 +16,7 @@ sourcecode:
 name: FM Radio
 id: fm_radio
 category: GPIO
-version: "2.1"
+version: "2.2"
 author: Coolshrimp
 
 icon: radio.png

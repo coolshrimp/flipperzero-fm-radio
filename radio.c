@@ -1531,15 +1531,16 @@ static void draw_top_bar(Canvas* canvas) {
 static void draw_connection_splash(Canvas* canvas) {
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str_aligned(canvas, 64, 4, AlignCenter, AlignTop, "Connect FM Tuner");
-    canvas_draw_line(canvas, 8, 15, 119, 15);
+    canvas_draw_str_aligned(canvas, 64, 0, AlignCenter, AlignTop, "Connect FM Tuner");
+    canvas_draw_line(canvas, 8, 12, 119, 12);
 
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str_aligned(canvas, 64, 17, AlignCenter, AlignTop, "Searching automatically...");
-    canvas_draw_str(canvas, 7, 32, "Si4703 SDIO:15  SCLK:16");
-    canvas_draw_str(canvas, 7, 42, "Si4703 RST: Flipper A4");
-    canvas_draw_str(canvas, 7, 52, "VCC:3V3 GND:GND SEN:3V3");
-    canvas_draw_str_aligned(canvas, 64, 64, AlignCenter, AlignBottom, "TEA: SDA15 SCL16, no RST");
+    canvas_draw_str(canvas, 2, 22, "Si4703:");
+    canvas_draw_str(canvas, 2, 30, "Pin 15 = SDIO | Pin 16 = SCLK");
+    canvas_draw_str(canvas, 2, 38, "Pin 4 = RST (Si Only)");
+    canvas_draw_str(canvas, 2, 47, "TEA5767:");
+    canvas_draw_str(canvas, 2, 55, "Pin 15 = SDA | Pin 16 = SCL");
+    canvas_draw_str(canvas, 2, 63, "3V3 = VCC | GND = GND");
 }
 
 static void tuner_draw_callback(Canvas* canvas, void* model) {
@@ -1766,11 +1767,7 @@ void my_app_view_draw_callback(Canvas* canvas, void* model) {
         // No valid chip data — show error
         canvas_set_font(canvas, FontPrimary);
         if(detected_chip == RadioChipNone) {
-            canvas_draw_str(canvas, 2, 22, "No FM Chip Found");
-            canvas_set_font(canvas, FontSecondary);
-            canvas_draw_str(canvas, 2, 33, "Pin 15 = SDA | Pin 16 = SLC");
-            canvas_draw_str(canvas, 2, 42, "Si4703 RST: Pin17");
-            canvas_draw_str(canvas, 2, 51, "TEA5767: no RST needed");
+            draw_connection_splash(canvas);
         } else {
             // Chip was detected but comms are failing (recovering)
             snprintf(station_display, sizeof(station_display), "%s: reconnecting", radio_get_chip_name());
@@ -2031,7 +2028,7 @@ MyApp* my_app_alloc() {
     
     char about_text[1152];
     snprintf(about_text, sizeof(about_text),
-        "FM Radio v2.1\n"
+        "FM Radio v2.2\n"
         "By Coolshrimp\n"
         "CoolshrimpModz.com\n"
         "---\n"

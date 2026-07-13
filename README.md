@@ -119,6 +119,10 @@ ufbt launch
 
 ## Changelog
 
+### v2.2
+- Cleaner "Connect FM Tuner" screen: per-chip pinout (Si4703 / TEA5767) with shared power line
+- Removed stale fallback wiring text that listed the wrong RST pin
+
 ### v2.1
 - **Fixed Si4703 tuning** — two init bugs kept the crystal oscillator from starting (TEST1 must be written as literal `0x8100`, and GPIO3 must stay high-impedance because the 32.768 kHz crystal hangs off RCLK/GPIO3). Tune and seek now complete reliably.
 - **Volume control on Si4703** — OK cycles Low → Med → High → Mute; hold OK for instant mute with restore

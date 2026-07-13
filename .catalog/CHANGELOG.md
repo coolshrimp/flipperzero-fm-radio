@@ -1,3 +1,8 @@
+# 2.2
+
+- Cleaner "Connect FM Tuner" screen with per-chip pinout (Si4703 / TEA5767)
+- Removed stale fallback wiring text that listed the wrong RST pin
+
 # 2.1
 
 - Fixed Si4703 tuning: crystal oscillator now starts reliably (TEST1 literal write, GPIO3 kept high-impedance) so tune/seek complete
