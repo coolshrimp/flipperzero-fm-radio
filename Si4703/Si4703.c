@@ -31,8 +31,10 @@ static bool si4703_powered_up = false;
 
 typedef enum {
     Si4703OpNone = 0,
-    Si4703OpTune,
-    Si4703OpSeek,
+    Si4703OpTuneWaitSet,
+    Si4703OpTuneWaitClear,
+    Si4703OpSeekWaitSet,
+    Si4703OpSeekWaitClear,
 } Si4703Op;
 
 static Si4703Op si4703_op = Si4703OpNone;
@@ -40,6 +42,14 @@ static uint32_t si4703_op_start_tick = 0;
 
 static const uint32_t si4703_tune_timeout_ms = 2000;
 static const uint32_t si4703_seek_timeout_ms = 8000;
+
+static bool si4703_ids_are_valid(const uint16_t* registers) {
+    if(!registers) return false;
+    const uint16_t device_id = registers[SI4703_DEVICEID];
+    const uint16_t chip_id = registers[SI4703_CHIPID];
+    return !((device_id == 0x0000 && chip_id == 0x0000) ||
+             (device_id == 0xFFFF && chip_id == 0xFFFF));
+}
 
 // Reset powerup state (call when chip is disconnected)
 void si4703_reset_state(void) {
@@ -86,16 +96,41 @@ static void si4703_service_after_read(uint16_t* registers) {
 
     const uint32_t now = furi_get_tick();
     const uint32_t elapsed = now - si4703_op_start_tick;
-    const uint32_t timeout = (si4703_op == Si4703OpSeek) ? si4703_seek_timeout_ms : si4703_tune_timeout_ms;
+    const bool is_seek =
+        (si4703_op == Si4703OpSeekWaitSet || si4703_op == Si4703OpSeekWaitClear);
+    const bool waiting_for_clear =
+        (si4703_op == Si4703OpTuneWaitClear || si4703_op == Si4703OpSeekWaitClear);
+    const uint32_t timeout = is_seek ? si4703_seek_timeout_ms : si4703_tune_timeout_ms;
 
     const bool stc = (registers[SI4703_STATUSRSSI] & SI4703_STAT_STC) != 0;
+
+    // After clearing TUNE/SEEK, the datasheet requires waiting for STC to clear
+    // before another operation may begin.
+    if(waiting_for_clear) {
+        if(!stc) {
+            FURI_LOG_I("Si4703", "STC cleared; operation complete");
+            si4703_op = Si4703OpNone;
+        } else if(elapsed >= timeout) {
+            FURI_LOG_W("Si4703", "Timed out waiting for STC to clear");
+            si4703_op = Si4703OpNone;
+        }
+        return;
+    }
+
     if(!stc) {
         if(elapsed < timeout) return;
+        FURI_LOG_W("Si4703",
+            "%s timeout: DEV=0x%04X CHIP=0x%04X PWR=0x%04X CHAN=0x%04X TEST1=0x%04X STATUS=0x%04X READCHAN=0x%04X",
+            is_seek ? "Seek" : "Tune",
+            registers[SI4703_DEVICEID], registers[SI4703_CHIPID],
+            registers[SI4703_POWERCFG], registers[SI4703_CHANNEL],
+            registers[SI4703_TEST1],
+            registers[SI4703_STATUSRSSI], registers[SI4703_READCHAN]);
         // Timeout: best-effort clear the initiating bit to avoid getting stuck
-        if(si4703_op == Si4703OpSeek) {
+        if(is_seek) {
             registers[SI4703_POWERCFG] &= ~SI4703_PWR_SEEK;
             (void)si4703_write_registers(registers);
-        } else if(si4703_op == Si4703OpTune) {
+        } else {
             registers[SI4703_CHANNEL] &= ~SI4703_CH_TUNE;
             (void)si4703_write_registers(registers);
         }
@@ -104,14 +139,19 @@ static void si4703_service_after_read(uint16_t* registers) {
     }
 
     // STC set: clear the initiating bit and finish
-    if(si4703_op == Si4703OpSeek) {
+    FURI_LOG_I("Si4703", "STC set (STATUSRSSI=0x%04X); clearing %s",
+        registers[SI4703_STATUSRSSI], is_seek ? "SEEK" : "TUNE");
+    if(is_seek) {
         registers[SI4703_POWERCFG] &= ~SI4703_PWR_SEEK;
-        (void)si4703_write_registers(registers);
-    } else if(si4703_op == Si4703OpTune) {
+    } else {
         registers[SI4703_CHANNEL] &= ~SI4703_CH_TUNE;
-        (void)si4703_write_registers(registers);
     }
-    si4703_op = Si4703OpNone;
+    if(si4703_write_registers(registers)) {
+        si4703_op = is_seek ? Si4703OpSeekWaitClear : Si4703OpTuneWaitClear;
+        si4703_op_start_tick = now;
+    } else {
+        si4703_op = Si4703OpNone;
+    }
 }
 
 // Helper functions for I2C
@@ -145,10 +185,10 @@ bool si4703_is_device_ready(void) {
     // Si4703 needs powerup sequence before it will respond on I2C
     if(!si4703_powerup()) {
         FURI_LOG_E("Si4703", "Powerup failed - check wiring:");
-        FURI_LOG_E("Si4703", "  RST -> Pin 4 (PA4)");
+        FURI_LOG_E("Si4703", "  RST -> Flipper A4 (MCU PA4)");
         FURI_LOG_E("Si4703", "  SDA/SDIO -> Pin 15 (PC1 / C1)");
         FURI_LOG_E("Si4703", "  SCL/SCLK -> Pin 16 (PC0 / C0)");
-        FURI_LOG_E("Si4703", "  SEN -> tied HIGH on breakout (I2C mode)");
+        FURI_LOG_E("Si4703", "  SEN -> 3.3V (2-wire I2C mode; pulled high on most breakouts)");
         FURI_LOG_E("Si4703", "  VCC -> 3.3V");
         FURI_LOG_E("Si4703", "  GND -> GND");
         return false;
@@ -163,7 +203,7 @@ bool si4703_is_device_ready(void) {
         FURI_LOG_I("Si4703", "=== Si4703 device detected successfully ===");
     } else {
         FURI_LOG_W("Si4703", "=== Si4703 device not responding on I2C ===");
-        FURI_LOG_W("Si4703", "Check SEN pin is connected to 3.3V (not GND)");
+        FURI_LOG_W("Si4703", "Check SEN is high (3.3V) for 2-wire I2C mode");
     }
     
     return result;
@@ -279,32 +319,34 @@ bool si4703_powerup(void) {
     // IMPORTANT: Flipper external I2C pins are:
     //   Pin 15 = C1 = PC1 = SDA/SDIO
     //   Pin 16 = C0 = PC0 = SCL/SCLK
-    // Si4703 bootstrap requires SDIO held LOW while RST rises, and SCLK held HIGH.
+    // Match the known-working module: SDIO and SCLK LOW while RST rises.
     const GpioPin sda_pin = {.port = GPIOC, .pin = LL_GPIO_PIN_1};
     const GpioPin scl_pin = {.port = GPIOC, .pin = LL_GPIO_PIN_0};
     furi_hal_gpio_init(&scl_pin, GpioModeOutputPushPull, GpioPullNo, GpioSpeedVeryHigh);
-    furi_hal_gpio_write(&scl_pin, true);  // Force clock line HIGH before RST↑
+    furi_hal_gpio_write(&scl_pin, false); // Hold SCLK low during mode selection
     
     // Reset sequence - CRITICAL: SDIO must be LOW when RST transitions LOW to HIGH
     // This selects I2C mode instead of SPI mode
     FURI_LOG_I("Si4703", "Asserting reset (RST low)...");
     furi_hal_gpio_write(&si4703_rst_pin, false);  // Pull RST low first
-    furi_delay_ms(1);
     
     FURI_LOG_I("Si4703", "Holding SDIO low...");
     furi_hal_gpio_init(&sda_pin, GpioModeOutputPushPull, GpioPullNo, GpioSpeedVeryHigh);
     furi_hal_gpio_write(&sda_pin, false);  // Hold SDIO low
-    furi_delay_ms(1);
+    furi_delay_ms(100);
     
     FURI_LOG_I("Si4703", "Releasing reset (RST high)...");
     furi_hal_gpio_write(&si4703_rst_pin, true);   // Release RST (goes high)
-    furi_delay_ms(110);  // Wait for chip to come out of reset (datasheet 110ms)
+    // Interface mode is latched on the rising edge. Release the bus promptly;
+    // holding SDIO low throughout the entire startup can stall some modules.
+    furi_delay_ms(1);
     
     // Release SDIO and SCLK back to high-Z/open-drain so I2C hardware can reclaim them
     FURI_LOG_I("Si4703", "Releasing SDIO/SCLK pins...");
     furi_hal_gpio_init(&sda_pin, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
     furi_hal_gpio_init(&scl_pin, GpioModeAnalog, GpioPullNo, GpioSpeedLow);
-    furi_delay_ms(10);
+    // Allow the internal power-on calibration to complete after releasing the bus.
+    furi_delay_ms(500);
     
     // Reinitialize I2C - equivalent of Wire.begin()
     FURI_LOG_I("Si4703", "Reinitializing I2C bus...");
@@ -327,7 +369,13 @@ bool si4703_powerup(void) {
     uint16_t temp_registers[16] = {0};
     
     if(!si4703_read_registers(temp_registers)) {
-        FURI_LOG_E("Si4703", "Failed to read registers - check wiring (RST, SDA, SCL, SEN tied HIGH)");
+        FURI_LOG_E("Si4703", "Failed to read registers - check RST, SDIO, SCLK and SEN high");
+        return false;
+    }
+
+    if(!si4703_ids_are_valid(temp_registers)) {
+        FURI_LOG_E("Si4703", "Invalid device identity (DEVICEID=0x%04X CHIPID=0x%04X)",
+            temp_registers[SI4703_DEVICEID], temp_registers[SI4703_CHIPID]);
         return false;
     }
     
@@ -361,7 +409,10 @@ bool si4703_init(uint16_t* registers) {
         return false;
     }
     
-    // Enable crystal oscillator (TEST1 register) - must be done before power enable
+    // Enable crystal oscillator (TEST1 register) - must be done before power enable.
+    // Write the literal value 0x8100 (XOSCEN + reserved bit 8) per AN230 rev 0.61.
+    // OR-ing only bit 15 into the read-back value is the AN230 rev 0.5 method and
+    // is known NOT to work — STC never asserts and every tune/seek times out.
     registers[SI4703_TEST1] = 0x8100;
     if(!si4703_write_registers(registers)) {
         FURI_LOG_E("Si4703", "Failed to enable oscillator");
@@ -382,9 +433,12 @@ bool si4703_init(uint16_t* registers) {
     // Bit 0:  1 = Enable powerup
     
     // Configure SYSCONFIG1 register (0x04)
-    registers[SI4703_SYSCONFIG1] = 0x1010;  // RDS enabled, 50us de-emphasis (Europe)
+    // GPIO3 (bits 5:4) MUST stay 00 (high impedance): the module's 32.768 kHz
+    // crystal is connected across RCLK and GPIO3, so driving GPIO3 as an output
+    // stops the oscillator — powerup never completes and tune/seek never sets STC.
+    registers[SI4703_SYSCONFIG1] = 0x1000;  // RDS enabled, 75us de-emphasis (North America), GPIOs high-Z
     // Bit 12: 1 = RDS Enable
-    // Bit 11: 0 = 50us de-emphasis (Europe) - set to 0 for US (75us)
+    // Bit 11: 0 = 75us de-emphasis (US/Canada); set to 1 for 50us (Europe)
     
     // Configure SYSCONFIG2 register (0x05)
     // Band: 87.5-108 MHz (US/Europe), Space: 100 kHz, Volume: 8
@@ -485,8 +539,10 @@ bool si4703_seek(uint16_t* registers, bool seek_up) {
     
     if(!si4703_write_registers(registers)) return false;
 
-    si4703_op = Si4703OpSeek;
+    si4703_op = Si4703OpSeekWaitSet;
     si4703_op_start_tick = furi_get_tick();
+    FURI_LOG_I("Si4703", "Seek %s started (POWERCFG=0x%04X)",
+        seek_up ? "up" : "down", registers[SI4703_POWERCFG]);
     return true;
 }
 
@@ -537,6 +593,10 @@ bool si4703_set_frequency(uint16_t* registers, int freq_khz) {
     if(spacing == SI4703_SPACE_100KHZ) spacing_val = 10;
     else if(spacing == SI4703_SPACE_50KHZ) spacing_val = 5;
     
+    // Validate before signed arithmetic is converted to an unsigned channel.
+    int max_freq = (band == SI4703_BAND_JAPAN) ? 9000 : 10800;
+    if(freq_khz < base_freq * 10 || freq_khz > max_freq * 10) return false;
+
     // Calculate channel number
     int freq_10khz = freq_khz / 10;  // Convert to 10 kHz units
     uint16_t channel = (freq_10khz - base_freq) / spacing_val;
@@ -551,8 +611,10 @@ bool si4703_set_frequency(uint16_t* registers, int freq_khz) {
     
     if(!si4703_write_registers(registers)) return false;
 
-    si4703_op = Si4703OpTune;
+    si4703_op = Si4703OpTuneWaitSet;
     si4703_op_start_tick = furi_get_tick();
+    FURI_LOG_I("Si4703", "Tune started: %d kHz, channel=%u (CHANNEL=0x%04X)",
+        freq_khz, channel, registers[SI4703_CHANNEL]);
     return true;
 }
 
@@ -565,8 +627,7 @@ bool si4703_get_radio_info(uint16_t* registers, SI4703_RADIO_INFO* info) {
     if(!si4703_read_registers(registers)) return false;
     
     // Sanity check: if DEVICEID and CHIPID are both 0x0000 or 0xFFFF, chip is disconnected
-    if((registers[SI4703_DEVICEID] == 0x0000 && registers[SI4703_CHIPID] == 0x0000) ||
-       (registers[SI4703_DEVICEID] == 0xFFFF && registers[SI4703_CHIPID] == 0xFFFF)) {
+    if(!si4703_ids_are_valid(registers)) {
         FURI_LOG_W("Si4703", "Chip health check failed - disconnected or bus error");
         si4703_reset_state();
         return false;

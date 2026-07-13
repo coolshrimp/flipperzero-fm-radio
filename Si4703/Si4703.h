@@ -11,15 +11,15 @@
  * ----------------------------
  * Pin (SDIO) -> Flipper GPIO Pin 15 (SDA, PC1) - ESP32 Pin 19 - I2C Data + GPIO control during powerup
  * Pin (SCLK) -> Flipper GPIO Pin 16 (SCL, PC0) - ESP32 Pin 18 - I2C Clock
- * Pin (RST)  -> Flipper GPIO Pin 4 (A4, PA4) - ESP32 Pin 21 - **REQUIRED** Reset pin (active low)
- * Pin (SEN)  -> Tie to 3.3V (HIGH) for I2C mode - - ESP32 Pin 22 -
+ * Pin (RST)  -> Flipper header A4 (MCU PA4) - **REQUIRED** Reset pin (active low)
+ * Pin (SEN)  -> Tie to 3.3V for 2-wire I2C mode (pulled high on most breakouts)
  * Pin (GPIO1) -> Optional: Can be used for interrupt (not required for basic operation)
  * Pin (GPIO2) -> Optional: Can be used for interrupt (not required for basic operation)
  * VCC        -> 3.3V
  * GND        -> GND
  * 
  * IMPORTANT: RST pin is REQUIRED! Si4703 needs a special powerup sequence where
- * SDIO is held low while RST transitions from low to high with SEN held HIGH
+ * SDIO is held low while RST transitions from low to high with SEN high
  * to enable I2C mode.
  * Without RST control, the chip will not respond on I2C bus.
  * 

@@ -1,3 +1,11 @@
+# 2.1
+
+- Fixed Si4703 tuning: crystal oscillator now starts reliably (TEST1 literal write, GPIO3 kept high-impedance) so tune/seek complete
+- Volume control on Si4703: OK cycles Low / Med / High / Mute, hold OK for instant mute with restore
+- New Start Volume setting (Low / Med / High / Last)
+- New Resume Station setting: reopens your last frequency on startup
+- Last volume and station persist across runs
+
 # 2.0
 
 - Added **Si4703** chip support with automatic detection (TEA5767 still fully supported)

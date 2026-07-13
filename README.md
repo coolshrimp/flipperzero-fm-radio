@@ -7,6 +7,9 @@ FM radio app for the Flipper Zero that controls external FM tuner boards over I2
 ## Features
 
 - **Dual chip support** — auto-detects TEA5767 or Si4703 at startup (or force a chip in Settings)
+- **Volume control (Si4703)** — OK cycles Low → Med → High → Mute; hold OK for instant mute/restore
+- **Start Volume** setting (Low / Med / High / Last) — "Last" remembers your volume between runs
+- **Resume Station** — reopens the frequency you were listening to last time
 - Region-based station lists loaded from SD card (auto-creates defaults if missing)
 - Preset up/down with on-screen indicators
 - Seek up/down with adjustable seek strength (1–15)
@@ -55,7 +58,8 @@ A full Flipper Zero pinout diagram is in [docs/flipper-zero-pinout.jpg](docs/fli
 | Down | Preset Down ▼ |
 | Left | Seek Down |
 | Right | Seek Up |
-| OK | Toggle Mute |
+| OK | Volume: Low → Med → High → Mute (Si4703) / Toggle Mute (TEA5767) |
+| OK (hold) | Instant mute — hold again to restore previous volume |
 
 In the **Tuner** view, Left/Right fine-tune in 0.1 MHz steps and Up/Down auto-seek.
 
@@ -88,6 +92,8 @@ To change regions: open the app → **Settings** → choose your region. Use **S
 |---------|-------------|
 | Chip Select | Auto (detect) / TEA5767 / Si4703 |
 | Region | Which station list to load |
+| Start Volume | Low / Med / High / Last — "Last" restores the volume from your previous session (Si4703) |
+| Resume Station | On = reopens the last tuned frequency at startup; Off = starts at the first preset |
 | Mute On Exit | On = radio goes to standby when you exit; Off = keeps playing |
 | Seek Strength (1–15) | Lower = finds weaker stations, higher = only strong stations (default 7) |
 | Audio Mode | Stereo / Mono (Left) / Mono (Right) — Si4703 supports Stereo/Mono only |
@@ -112,6 +118,13 @@ ufbt launch
 - [docs/arduino-reference-Si4703.ino](docs/arduino-reference-Si4703.ino) — Arduino reference sketch used during Si4703 driver development
 
 ## Changelog
+
+### v2.1
+- **Fixed Si4703 tuning** — two init bugs kept the crystal oscillator from starting (TEST1 must be written as literal `0x8100`, and GPIO3 must stay high-impedance because the 32.768 kHz crystal hangs off RCLK/GPIO3). Tune and seek now complete reliably.
+- **Volume control on Si4703** — OK cycles Low → Med → High → Mute; hold OK for instant mute with restore
+- New **Start Volume** setting (Low / Med / High / Last)
+- New **Resume Station** setting — reopens your last frequency on startup
+- Last volume and last station persist across runs
 
 ### v2.0
 - **Si4703 support** with automatic chip detection (TEA5767 still fully supported)

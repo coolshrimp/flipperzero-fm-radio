@@ -85,12 +85,18 @@ typedef enum {
 } ChipSelect;
 
 // App settings structure
+// NOTE: saved raw to settings.cfg — adding fields changes sizeof(AppSettings),
+// which invalidates old files once (loader falls back to defaults and re-saves).
 typedef struct {
     bool mute_on_exit;
     uint8_t seek_strength;  // 1-15
     AudioMode audio_mode;
     uint32_t region_index;
     ChipSelect chip_select;
+    uint8_t start_volume;     // 0=Low 1=Med 2=High 3=Last (remember previous volume)
+    uint8_t last_volume_step; // remembered volume step (1-3), used when start_volume==Last
+    bool resume_station;      // restore last tuned frequency on startup
+    float last_frequency;     // last tuned frequency in MHz (0 = none saved yet)
 } AppSettings;
 
 // Default settings
@@ -100,7 +106,15 @@ AppSettings app_settings = {
     .audio_mode = AUDIO_MODE_STEREO,
     .region_index = 0,
     .chip_select = ChipSelectAuto,
+    .start_volume = 3,      // Last: remember volume across runs
+    .last_volume_step = 1,  // Low until the user changes it
+    .resume_station = true,
+    .last_frequency = 0.0f,
 };
+
+// Start Volume option names (index matches app_settings.start_volume)
+const char* start_volume_names[] = {"Low", "Med", "High", "Last"};
+#define NUM_START_VOLUME_OPTIONS 4
 
 #define NUM_VOLUME_VALUES (sizeof(volume_values) / sizeof(volume_values[0]))
 
@@ -141,6 +155,10 @@ static const uint32_t radio_info_refresh_ms = 250;
 // Consecutive I2C failure counter — triggers fast recovery after threshold
 static uint8_t radio_fail_count = 0;
 #define RADIO_FAIL_THRESHOLD 5
+#define RADIO_RECONNECT_INTERVAL_MS 2000
+
+static uint32_t radio_last_reconnect_tick = 0;
+static bool radio_disconnect_notified = false;
 
 // TEA5767 STATUS bytes have no mute-state bit — track it here instead
 static bool radio_muted = false;
@@ -191,6 +209,7 @@ static bool parse_frequency(const char* text, float* out_value) {
 // Forward declarations (used by unified radio wrappers below)
 void apply_audio_mode(uint8_t* buffer, AudioMode mode);
 void apply_seek_strength(uint8_t* buffer, uint8_t strength);
+static void radio_apply_volume_step(void);
 
 static const char* radio_get_chip_name(void) {
     switch(detected_chip) {
@@ -257,7 +276,9 @@ static bool radio_init(void) {
     radio_muted = false;  // Reset mute state whenever chip is (re)initialized
 
     if(detected_chip == RadioChipSi4703) {
-        return si4703_init(si4703_registers);
+        if(!si4703_init(si4703_registers)) return false;
+        radio_apply_volume_step(); // restore user's volume after (re)init resets it to 8
+        return true;
     } else if(detected_chip == RadioChipTEA5767) {
         return tea5767_init(tea5767_registers);
     }
@@ -329,10 +350,37 @@ static bool radio_seek_from_current(bool seek_up) {
     return false;
 }
 
-static void radio_toggle_mute(void) {
+// Volume steps for the Si4703's hardware volume register (SYSCONFIG2 bits 3:0).
+// The TEA5767 has no volume control, so OK stays a plain mute toggle there.
+static const uint8_t si4703_volume_steps[] = {0, 5, 10, 15}; // Muted, Low, Med, High
+static const char* volume_step_names[] = {"Muted", "Vol: Low", "Vol: Med", "Vol: High"};
+#define VOLUME_STEP_MAX 3
+static uint8_t volume_step = 1;      // start at Low; each OK press steps upward
+static uint8_t last_volume_step = 1; // restore target when hold-to-mute is released
+
+static void radio_apply_volume_step(void) {
+    if(detected_chip != RadioChipSi4703) return;
+    if(volume_step == 0) {
+        si4703_set_mute(si4703_registers, true);
+    } else {
+        si4703_set_volume(si4703_registers, si4703_volume_steps[volume_step]);
+        si4703_set_mute(si4703_registers, false);
+    }
+}
+
+// Status-line text: Si4703 shows the volume step, TEA5767 just Muted/Playing
+static const char* radio_play_state_str(bool muted) {
+    if(muted) return "Muted";
+    if(detected_chip == RadioChipSi4703) return volume_step_names[volume_step];
+    return "Playing";
+}
+
+// OK short press: Si4703 cycles Low -> Med -> High -> Muted -> Low; TEA5767 toggles mute
+static void radio_ok_pressed(void) {
     if(detected_chip == RadioChipSi4703) {
-        // Si4703 tracks mute in its own registers; get_radio_info reads DMUTE directly
-        si4703_ToggleMute();
+        volume_step = (volume_step + 1) % (VOLUME_STEP_MAX + 1);
+        if(volume_step != 0) last_volume_step = volume_step;
+        radio_apply_volume_step();
     } else if(detected_chip == RadioChipTEA5767) {
         // TEA5767 STATUS bytes have no mute bit — track state ourselves.
         // STATUS byte 0 bits[5:0] = PLL[13:8] and STATUS byte 1 = PLL[7:0]
@@ -352,6 +400,23 @@ static void radio_toggle_mute(void) {
     }
     // Invalidate display cache so status line updates immediately
     cached_info_valid = false;
+}
+
+// OK hold: Si4703 mutes instantly; holding again restores the previous volume.
+// TEA5767 has no volume register, so hold is the same mute toggle as a press.
+static void radio_ok_held(void) {
+    if(detected_chip == RadioChipSi4703) {
+        if(volume_step == 0) {
+            volume_step = last_volume_step;
+        } else {
+            last_volume_step = volume_step;
+            volume_step = 0;
+        }
+        radio_apply_volume_step();
+        cached_info_valid = false;
+    } else if(detected_chip == RadioChipTEA5767) {
+        radio_ok_pressed();
+    }
 }
 
 // Persists tuner position across fast button presses so the cache miss never resets to 88
@@ -407,6 +472,31 @@ static void radio_try_fast_recover(void) {
             FURI_LOG_W(TAG, "TEA5767 gone from bus, marking lost");
             detected_chip = RadioChipNone;
         }
+    }
+}
+
+static void radio_service_connection(NotificationApp* notifications) {
+    const uint32_t now = furi_get_tick();
+    if(detected_chip != RadioChipNone) return;
+
+    if(!radio_disconnect_notified) {
+        FURI_LOG_W(TAG, "Tuner disconnected; automatic reconnect enabled");
+        if(notifications) notification_message(notifications, &sequence_error);
+        radio_disconnect_notified = true;
+    }
+
+    if((now - radio_last_reconnect_tick) < RADIO_RECONNECT_INTERVAL_MS) return;
+    radio_last_reconnect_tick = now;
+    si4703_reset_state();
+
+    if(detect_radio_chip() && radio_init()) {
+        FURI_LOG_I(TAG, "Tuner restored: %s", radio_get_chip_name());
+        radio_fail_count = 0;
+        cached_info_valid = false;
+        radio_disconnect_notified = false;
+        if(notifications) notification_message(notifications, &sequence_success);
+    } else {
+        detected_chip = RadioChipNone;
     }
 }
 
@@ -505,6 +595,11 @@ bool load_app_settings(Storage* storage) {
             if(app_settings.seek_strength > 15) app_settings.seek_strength = 15;
             if(app_settings.audio_mode > AUDIO_MODE_MONO_RIGHT) app_settings.audio_mode = AUDIO_MODE_STEREO;
             if(app_settings.region_index >= NUM_REGIONS) app_settings.region_index = 0;
+            if(app_settings.start_volume >= NUM_START_VOLUME_OPTIONS) app_settings.start_volume = 3;
+            if(app_settings.last_volume_step < 1 || app_settings.last_volume_step > VOLUME_STEP_MAX)
+                app_settings.last_volume_step = 1;
+            if(app_settings.last_frequency < 87.5f || app_settings.last_frequency > 108.0f)
+                app_settings.last_frequency = 0.0f;
             result = true;
         }
         storage_file_close(file);
@@ -866,7 +961,7 @@ bool load_stations_from_file(Storage* storage, const char* filename) {
     }
     
     free(temp_stations);
-    return (count > 0);
+    return stations != NULL && num_stations > 0;
 }
 
 // Load default stations for a region
@@ -963,6 +1058,22 @@ typedef struct {
     Storage* storage;
 } MyApp;
 
+#define RADIO_HEARTBEAT_EVENT 1U
+
+static bool my_app_custom_event_callback(void* context, uint32_t event) {
+    MyApp* app = context;
+    if(event != RADIO_HEARTBEAT_EVENT) return false;
+    radio_service_connection(app->notifications);
+    view_commit_model(app->view_flip_the_world, true);
+    view_commit_model(app->view_tuner, true);
+    return true;
+}
+
+static void my_app_tick_event_callback(void* context) {
+    MyApp* app = context;
+    view_dispatcher_send_custom_event(app->view_dispatcher, RADIO_HEARTBEAT_EVENT);
+}
+
 // Define a model struct for your application
 typedef struct {
     uint32_t current_station_index;
@@ -1031,8 +1142,11 @@ bool my_app_view_input_callback(InputEvent* event, void* context) {
         current_volume = 0;
         return true;
     } else if(event->type == InputTypeShort && event->key == InputKeyOk) {
-        radio_toggle_mute();
+        radio_ok_pressed();
         current_volume = (current_volume == 0) ? 1 : 0;
+        return true;
+    } else if(event->type == InputTypeLong && event->key == InputKeyOk) {
+        radio_ok_held();
         return true;
     } else if(event->type == InputTypeShort && event->key == InputKeyUp) {
         // Increment the current station index and loop back if at the end
@@ -1156,6 +1270,32 @@ void my_app_audio_mode_change(VariableItem* item) {
     }
 }
 
+// Callback for start volume setting (Low/Med/High/Last)
+void my_app_start_volume_change(VariableItem* item) {
+    MyApp* app = variable_item_get_context(item);
+    uint8_t index = variable_item_get_current_value_index(item);
+    app_settings.start_volume = index;
+    variable_item_set_current_value_text(item, start_volume_names[index]);
+    save_app_settings(app->storage);
+
+    // Fixed levels apply immediately for instant feedback; "Last" leaves volume alone
+    if(index <= 2 && detected_chip == RadioChipSi4703) {
+        volume_step = index + 1;
+        last_volume_step = volume_step;
+        radio_apply_volume_step();
+        cached_info_valid = false;
+    }
+}
+
+// Callback for resume-last-station setting
+void my_app_resume_station_change(VariableItem* item) {
+    MyApp* app = variable_item_get_context(item);
+    uint8_t index = variable_item_get_current_value_index(item);
+    app_settings.resume_station = (index == 1);
+    variable_item_set_current_value_text(item, app_settings.resume_station ? "On" : "Off");
+    save_app_settings(app->storage);
+}
+
 // Callback for chip selection override
 void my_app_chip_select_change(VariableItem* item) {
     MyApp* app = variable_item_get_context(item);
@@ -1244,13 +1384,34 @@ void my_app_view_enter_callback(void* context) {
         FURI_LOG_I(TAG, "Reloading stations for region %lu: %s", app_settings.region_index, regions[app_settings.region_index].name);
         load_default_stations_for_region(app->storage, app_settings.region_index);
         FURI_LOG_I(TAG, "After reload: num_stations=%lu", num_stations);
-        // Reset to first station when entering view
         current_station_index = 0;
-        
-        // Tune to first station if available
+
         if(num_stations > 0) {
-            if(radio_set_frequency_from_mhz(stations[0].frequency)) {
-                FURI_LOG_I(TAG, "Tuning to first station: %.1f MHz - %s", (double)stations[0].frequency, stations[0].name);
+            float target = stations[0].frequency;
+
+            if(app_settings.resume_station) {
+                // Prefer the live chip frequency (mid-session re-entry); fall back
+                // to the frequency persisted from the previous run (fresh start).
+                float resume = 0.0f;
+                if(cached_info.frequency >= 87.5f && cached_info.frequency <= 108.0f) {
+                    resume = cached_info.frequency;
+                } else if(app_settings.last_frequency >= 87.5f && app_settings.last_frequency <= 108.0f) {
+                    resume = app_settings.last_frequency;
+                }
+                if(resume > 0.0f) {
+                    target = resume;
+                    // Line up the preset index if the frequency matches one
+                    for(uint32_t i = 0; i < num_stations; i++) {
+                        if(fabsf(stations[i].frequency - resume) < 0.05f) {
+                            current_station_index = i;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if(radio_set_frequency_from_mhz(target)) {
+                FURI_LOG_I(TAG, "Tuning to %.1f MHz on view enter", (double)target);
             }
         }
     } else {
@@ -1366,6 +1527,21 @@ static void draw_top_bar(Canvas* canvas) {
 // Tuner View — visual station seeker (88–108 MHz dial with needle)
 // ============================================================================
 
+// Full-screen connection splash shown while the app probes for a tuner.
+static void draw_connection_splash(Canvas* canvas) {
+    canvas_clear(canvas);
+    canvas_set_font(canvas, FontPrimary);
+    canvas_draw_str_aligned(canvas, 64, 4, AlignCenter, AlignTop, "Connect FM Tuner");
+    canvas_draw_line(canvas, 8, 15, 119, 15);
+
+    canvas_set_font(canvas, FontSecondary);
+    canvas_draw_str_aligned(canvas, 64, 17, AlignCenter, AlignTop, "Searching automatically...");
+    canvas_draw_str(canvas, 7, 32, "Si4703 SDIO:15  SCLK:16");
+    canvas_draw_str(canvas, 7, 42, "Si4703 RST: Flipper A4");
+    canvas_draw_str(canvas, 7, 52, "VCC:3V3 GND:GND SEN:3V3");
+    canvas_draw_str_aligned(canvas, 64, 64, AlignCenter, AlignBottom, "TEA: SDA15 SCL16, no RST");
+}
+
 static void tuner_draw_callback(Canvas* canvas, void* model) {
     (void)model;
 
@@ -1382,13 +1558,7 @@ static void tuner_draw_callback(Canvas* canvas, void* model) {
 
     // No chip — show same error screen as the main view, then bail
     if(detected_chip == RadioChipNone) {
-        canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 2, 22, "No FM Chip Found");
-        canvas_set_font(canvas, FontSecondary);
-        canvas_draw_str(canvas, 2, 33, "Pin 15 = SDA | Pin 16 = SLC");
-        canvas_draw_str(canvas, 2, 42, "Si4703 RST: Pin17");
-        canvas_draw_str(canvas, 2, 51, "TEA5767: no RST needed");
-        elements_button_center(canvas, "Mute");
+        draw_connection_splash(canvas);
         return;
     }
 
@@ -1448,7 +1618,7 @@ static void tuner_draw_callback(Canvas* canvas, void* model) {
     if(cached_info_valid) {
         char status_str[24];
         snprintf(status_str, sizeof(status_str), "%s  %s",
-            cached_info.muted ? "Muted" : "Playing",
+            radio_play_state_str(cached_info.muted),
             cached_info.stereo ? "Stereo" : "Mono");
         uint8_t sw = canvas_string_width(canvas, status_str);
         canvas_draw_str(canvas, 64 - sw / 2, 48, status_str);
@@ -1456,9 +1626,9 @@ static void tuner_draw_callback(Canvas* canvas, void* model) {
         canvas_draw_str(canvas, 2, 48, "Connecting...");
     }
 
-    // --- Bottom hint bar: [← → Tune] [OK Mute] [↑↓ Seek] ---
+    // --- Bottom hint bar: [← → Tune] [OK Vol/Mute] [↑↓ Seek] ---
     // elements_button_center draws the proper SDK center button (y=52..63, centered on x=64)
-    elements_button_center(canvas, "Mute");
+    elements_button_center(canvas, detected_chip == RadioChipSi4703 ? "Vol" : "Mute");
 
     // Left zone — ← → Tune (drawn after center button so they sit on the same row)
     canvas_draw_icon_ex(canvas, 3, 56, &I_ButtonUp_7x4, IconRotation270); // ← (4w×7h)
@@ -1476,6 +1646,11 @@ static void tuner_draw_callback(Canvas* canvas, void* model) {
 static bool tuner_input_callback(InputEvent* event, void* context) {
     (void)context;
     bool consumed = false;
+
+    if(event->type == InputTypeLong && event->key == InputKeyOk) {
+        radio_ok_held();
+        return true;
+    }
 
     if(event->type == InputTypeShort || event->type == InputTypeRepeat) {
         switch(event->key) {
@@ -1499,7 +1674,7 @@ static bool tuner_input_callback(InputEvent* event, void* context) {
             break;
         case InputKeyOk:
             if(event->type == InputTypeShort) {
-                radio_toggle_mute();
+                radio_ok_pressed();
                 cached_info_valid = false;
             }
             consumed = true;
@@ -1515,11 +1690,16 @@ static bool tuner_input_callback(InputEvent* event, void* context) {
 void my_app_view_draw_callback(Canvas* canvas, void* model) {
     (void)model;
 
+    if(detected_chip == RadioChipNone) {
+        draw_connection_splash(canvas);
+        return;
+    }
+
     // --- Top bar: [Scan-] [Presets ↑↓] [Scan+] ---
     draw_top_bar(canvas);
 
-    // --- Bottom bar: Mute (standard SDK center button) ---
-    elements_button_center(canvas, "Mute");
+    // --- Bottom bar: Vol/Mute (standard SDK center button) ---
+    elements_button_center(canvas, detected_chip == RadioChipSi4703 ? "Vol" : "Mute");
 
     // --- Refresh radio info at a controlled rate ---
     const uint32_t now_tick = furi_get_tick();
@@ -1568,7 +1748,7 @@ void my_app_view_draw_callback(Canvas* canvas, void* model) {
         // Line 3 (y=42): Mute/Play + Stereo/Mono status
         canvas_set_font(canvas, FontSecondary);
         snprintf(volume_display, sizeof(volume_display), "%s  %s",
-            info.muted ? "Muted" : "Playing",
+            radio_play_state_str(info.muted),
             info.stereo ? "Stereo" : "Mono");
         canvas_draw_str(canvas, 2, 42, volume_display);
 
@@ -1605,6 +1785,8 @@ void my_app_view_draw_callback(Canvas* canvas, void* model) {
 // Allocate memory for the application
 MyApp* my_app_alloc() {
     MyApp* app = (MyApp*)malloc(sizeof(MyApp));
+    if(!app) return NULL;
+    memset(app, 0, sizeof(MyApp));
     Gui* gui = furi_record_open(RECORD_GUI);
     
     // Initialize storage
@@ -1629,6 +1811,12 @@ MyApp* my_app_alloc() {
         // Settings file doesn't exist, create default
         save_app_settings(app->storage);
     }
+
+    // Apply start-volume setting before the chip is initialized
+    // (radio_init applies volume_step to the Si4703 after si4703_init)
+    volume_step = (app_settings.start_volume <= 2) ? (uint8_t)(app_settings.start_volume + 1) :
+                                                     app_settings.last_volume_step;
+    last_volume_step = volume_step;
     
     // Validate region index
     if(app_settings.region_index >= NUM_REGIONS && NUM_REGIONS > 0) {
@@ -1650,12 +1838,31 @@ MyApp* my_app_alloc() {
     } else {
         FURI_LOG_I(TAG, "Detected FM chip: %s", radio_get_chip_name());
         radio_init();
+
+        // Resume the last tuned frequency right away so it applies no matter
+        // which view the user opens first
+        if(app_settings.resume_station && app_settings.last_frequency >= 87.5f &&
+           app_settings.last_frequency <= 108.0f) {
+            FURI_LOG_I(TAG, "Resuming last station: %.1f MHz", (double)app_settings.last_frequency);
+            radio_set_frequency_from_mhz(app_settings.last_frequency);
+            tuner_tracked_freq = app_settings.last_frequency;
+        }
     }
 
     cached_info_valid = false;
     
     // Initialize the view dispatcher
     app->view_dispatcher = view_dispatcher_alloc();
+    if(!app->view_dispatcher) {
+        furi_record_close(RECORD_GUI);
+        furi_record_close(RECORD_STORAGE);
+        free_stations();
+        free(app);
+        return NULL;
+    }
+    view_dispatcher_set_event_callback_context(app->view_dispatcher, app);
+    view_dispatcher_set_custom_event_callback(app->view_dispatcher, my_app_custom_event_callback);
+    view_dispatcher_set_tick_event_callback(app->view_dispatcher, my_app_tick_event_callback, 250);
     view_dispatcher_attach_to_gui(app->view_dispatcher, gui, ViewDispatcherTypeFullscreen);
 
     // Initialize the submenu
@@ -1744,6 +1951,26 @@ MyApp* my_app_alloc() {
     variable_item_set_current_value_index(audio_item, app_settings.audio_mode);
     variable_item_set_current_value_text(audio_item, audio_mode_names[app_settings.audio_mode]);
 
+    // Add start volume setting (Low/Med/High/Last)
+    VariableItem* start_vol_item = variable_item_list_add(
+        app->variable_item_list_settings,
+        "Start Volume",
+        NUM_START_VOLUME_OPTIONS,
+        my_app_start_volume_change,
+        app);
+    variable_item_set_current_value_index(start_vol_item, app_settings.start_volume);
+    variable_item_set_current_value_text(start_vol_item, start_volume_names[app_settings.start_volume]);
+
+    // Add resume-last-station setting
+    VariableItem* resume_item = variable_item_list_add(
+        app->variable_item_list_settings,
+        "Resume Station",
+        2,
+        my_app_resume_station_change,
+        app);
+    variable_item_set_current_value_index(resume_item, app_settings.resume_station ? 1 : 0);
+    variable_item_set_current_value_text(resume_item, app_settings.resume_station ? "On" : "Off");
+
     // Add chip selection override (Auto / TEA5767 / Si4703)
     VariableItem* chip_item = variable_item_list_add(
         app->variable_item_list_settings,
@@ -1780,6 +2007,7 @@ MyApp* my_app_alloc() {
     view_set_draw_callback(app->view_tuner, tuner_draw_callback);
     view_set_input_callback(app->view_tuner, tuner_input_callback);
     view_set_context(app->view_tuner, app);
+    view_allocate_model(app->view_tuner, ViewModelTypeLockFree, sizeof(uint8_t));
     view_set_previous_callback(app->view_tuner, my_app_navigation_submenu_callback);
     view_dispatcher_add_view(app->view_dispatcher, MyAppViewTuner, app->view_tuner);
 
@@ -1801,9 +2029,9 @@ MyApp* my_app_alloc() {
     // Initialize the widget for displaying information about the app
     app->widget_about = widget_alloc();
     
-    char about_text[896];
+    char about_text[1152];
     snprintf(about_text, sizeof(about_text),
-        "FM Radio v2.0\n"
+        "FM Radio v2.1\n"
         "By Coolshrimp\n"
         "CoolshrimpModz.com\n"
         "---\n"
@@ -1814,13 +2042,16 @@ MyApp* my_app_alloc() {
         "LISTEN NOW\n"
         "Left/Right  = Seek\n"
         "Up/Down     = Preset\n"
-        "OK          = Mute\n"
+        "OK = Volume/Mute\n"
+        "  Si4703: Low/Med/Hi/Mute\n"
+        "  Hold OK = Mute now\n"
+        "  TEA5767: Mute toggle\n"
         "---\n"
         "TUNER VIEW\n"
         "Left/Right  = Fine tune\n"
         "             (0.1 MHz steps)\n"
         "Up/Down     = Auto seek\n"
-        "OK          = Mute\n"
+        "OK = Volume/Mute\n"
         "---\n"
         "SETTINGS\n"
         "Chip Select\n"
@@ -1831,6 +2062,10 @@ MyApp* my_app_alloc() {
         "  Higher = stronger signal\n"
         "  required to stop seek\n"
         "Region  (loads preset list)\n"
+        "Start Volume\n"
+        "  Low/Med/High/Last\n"
+        "Resume Station  On/Off\n"
+        "  reopens last frequency\n"
         "Mute on Exit  On/Off\n"
         "---\n"
         "STATION FILES (SD Card)\n"
@@ -1888,6 +2123,15 @@ void my_app_free(MyApp* app) {
     // Put radio to sleep (best-effort) if configured
     radio_sleep_or_unmute_on_exit();
 
+    // Persist last volume and last tuned frequency for the next run.
+    // cached_info retains the last good chip reading even when its valid
+    // flag is false; frequency 0 means the chip never reported anything.
+    app_settings.last_volume_step = (volume_step != 0) ? volume_step : last_volume_step;
+    if(cached_info.frequency >= 87.5f && cached_info.frequency <= 108.0f) {
+        app_settings.last_frequency = cached_info.frequency;
+    }
+    save_app_settings(app->storage);
+
     // Free station memory and close storage
     free_stations();
     furi_record_close(RECORD_STORAGE);
@@ -1898,6 +2142,7 @@ void my_app_free(MyApp* app) {
 int32_t fm_radio_app(void* p) {
     UNUSED(p);
     MyApp* app = my_app_alloc();
+    if(!app) return -1;
     view_dispatcher_run(app->view_dispatcher);
     my_app_free(app);
     return 0;
