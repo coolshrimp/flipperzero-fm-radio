@@ -29,7 +29,7 @@ The Si4703 additionally **requires**:
 
 ## Station Lists
 
-Station files live at `/ext/apps_data/fm_radio/` and are auto-created on first run. Each line is `frequency|Station Name`, for example `101.1|Jazz Radio`. Edit them or add your own regions - up to 100 stations per file.
+Station files live at /ext/apps_data/fm_radio/ and are auto-created on first run. Each line is frequency|Station Name, for example 101.1|Jazz Radio. Edit them or add your own regions - up to 100 stations per file.
 
 ## Controls
 
