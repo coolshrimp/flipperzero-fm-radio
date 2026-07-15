@@ -1,10 +1,23 @@
 # Application Submission
 
-FM Radio for Flipper Zero. Controls TEA5767 and Si4703 FM tuner boards over I2C with automatic chip detection, seek/fine tuning, volume control (Si4703), and editable station preset files on the SD card. See `.catalog/CHANGELOG.md` in the source repo for what changed in this version.
+FM Radio v2.2 — turns the Flipper Zero into an FM broadcast radio by controlling an external TEA5767 or Si4703 tuner board over I2C.
+
+Features:
+
+- Supports both TEA5767 and Si4703 tuner boards, auto-detected at startup (or force a chip in Settings)
+- Station presets loaded from editable .txt files on the SD card, organized by region, with an in-app file viewer
+- Seek up/down with adjustable seek strength, plus fine tuning in 0.1 MHz steps
+- Volume control on Si4703 (Low / Med / High / Mute) with instant-mute on long OK
+- Audio mode: Stereo, Mono (Left), or Mono (Right)
+- Start Volume and Resume Station settings; last station and volume persist across runs
+- Settings saved automatically to SD card
+
+Source repository: https://github.com/coolshrimp/flipperzero-fm-radio
 
 # Extra Requirements
 
-- Requires an external FM tuner board: TEA5767 or Si4703, wired to the I2C pins (Si4703 additionally uses A4 for RST).
+- Requires an external FM tuner board (TEA5767 or Si4703) wired to the I2C pins: VCC to 3V3 (pin 9), GND to GND (pin 18), SCL to C0 (pin 16), SDA to C1 (pin 15). The Si4703 additionally requires RST to A4 (pin 4) and SEN tied to 3.3V.
+- Headphones or a speaker connected to the tuner board's audio output.
 
 # Author Checklist (Fill this out)
 
@@ -19,4 +32,4 @@ FM Radio for Flipper Zero. Controls TEA5767 and Si4703 FM tuner boards over I2C 
 - [x] Partially AI assisted (clarify below which code was AI assisted and briefly explain what it does).
 - [ ] Fully AI generated (explain what all the generated code does in moderate detail).
 
-- AI assistance was used for portions of the app code and for preparing/validating this catalog manifest and submission. The app tunes TEA5767/Si4703 FM radio chips over I2C and manages station presets on the SD card.
+- AI assistance was used for portions of the app code (Si4703 driver integration, chip auto-detection, and settings/station-list persistence) and for preparing and validating this catalog manifest. The app tunes TEA5767/Si4703 FM radio chips over I2C and manages station preset files on the SD card.
