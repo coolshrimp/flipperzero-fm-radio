@@ -33,3 +33,9 @@ Source repository: https://github.com/coolshrimp/flipperzero-fm-radio
 - [ ] Fully AI generated (explain what all the generated code does in moderate detail).
 
 - AI assistance was used for portions of the app code (Si4703 driver integration, chip auto-detection, and settings/station-list persistence) and for preparing and validating this catalog manifest. The app tunes TEA5767/Si4703 FM radio chips over I2C and manages station preset files on the SD card.
+
+# Reviewer Checklist (Don't fill this out!)
+
+- [ ] Bundle is valid
+- [ ] There are no obvious issues with the source code
+- [ ] I've ran this application and verified its functionality
