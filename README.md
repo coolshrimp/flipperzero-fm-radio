@@ -4,6 +4,8 @@ FM radio app for the Flipper Zero that controls external FM tuner boards over I2
 
 <img src="screenshots/Screenshot1.png" width="250"> <img src="screenshots/Screenshot2.png" width="250">
 
+<img src="screenshots/Screenshot3.png" width="250"> <img src="screenshots/Screenshot4.png" width="250">
+
 ## Features
 
 - **Dual chip support** — auto-detects TEA5767 or Si4703 at startup (or force a chip in Settings)
